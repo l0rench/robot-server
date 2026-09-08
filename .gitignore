@@ -1,0 +1,12 @@
+build/
+*.o
+*.a
+*.so
+*.out
+industrial_gateway
+.vscode/
+.idea/
+*.log
+*.csv
+*.bak
+*.backup*
