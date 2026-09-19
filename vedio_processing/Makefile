@@ -26,11 +26,9 @@ SRC = $(SRC_DIR)/4vedio_processiong.cpp
 # 头文件路径
 INCLUDES = \
     -I$(INCLUDE_DIR) \
-    -I$(INCLUDE_DIR)/orbbec \
-    -I$(INCLUDE_DIR)/orbbec/libobsensor/h \
-    -I$(INCLUDE_DIR)/orbbec/libobsensor/hpp \
+    -I$(INCLUDE_DIR)/libobsensor/h \
+    -I$(INCLUDE_DIR)/libobsensor/hpp \
     -I/usr/local/include \
-    -I/home/cat/Orbbec/include/libobsensor/h
 
 # 链接库
 LIBS = \
