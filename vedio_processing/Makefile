@@ -11,19 +11,31 @@ CXXFLAGS = -std=c++17 -O2 -Wall -Wextra
 # 调试选项（取消注释可开启调试）
 # CXXFLAGS += -g -DDEBUG
 
+# 目录定义
+SRC_DIR = src
+BUILD_DIR = build
+INCLUDE_DIR = include
+LIB_DIR = lib
+
 # 目标程序
-TARGET = stream_gst
+TARGET = $(BUILD_DIR)/stream_gst
 
 # 源文件
-SRC = 4vedio_processiong.cpp
+SRC = $(SRC_DIR)/4vedio_processiong.cpp
 
 # 头文件路径
 INCLUDES = \
+    -I$(INCLUDE_DIR) \
+    -I$(INCLUDE_DIR)/orbbec \
+    -I$(INCLUDE_DIR)/orbbec/libobsensor/h \
+    -I$(INCLUDE_DIR)/orbbec/libobsensor/hpp \
     -I/usr/local/include \
     -I/home/cat/Orbbec/include/libobsensor/h
 
 # 链接库
 LIBS = \
+    -L$(LIB_DIR) \
+    -L/usr/local/lib \
     -lOrbbecSDK \
     -lpthread \
     -ldl \
@@ -52,7 +64,11 @@ LDFLAGS = $(PKG_LIBS) $(LIBS)
 # ============================================================
 
 # 默认目标
-all: $(TARGET)
+all: $(BUILD_DIR) $(TARGET)
+
+# 创建 build 目录
+$(BUILD_DIR):
+	@mkdir -p $(BUILD_DIR)
 
 # 链接
 $(TARGET): $(SRC)
@@ -76,13 +92,17 @@ $(TARGET): $(SRC)
 # 清理
 clean:
 	@echo "Cleaning..."
+	rm -rf $(BUILD_DIR)
 	rm -f $(TARGET)
-	rm -f *.o
 	rm -f timestamp_sender.csv
 	@echo "Done."
 
 # 清理并重新编译
 rebuild: clean all
+
+# 运行程序
+run: $(TARGET)
+	./$(TARGET)
 
 # 显示编译参数（调试用）
 show:
@@ -117,6 +137,7 @@ help:
 	@echo ""
 	@echo "  Targets:"
 	@echo "    all      - Build $(TARGET) (default)"
+	@echo "    run      - Build and run"
 	@echo "    clean    - Remove compiled files"
 	@echo "    rebuild  - Clean and rebuild"
 	@echo "    show     - Show compile parameters"
@@ -129,4 +150,4 @@ help:
 # 伪目标
 # ============================================================
 
-.PHONY: all clean rebuild show install uninstall help
+.PHONY: all clean rebuild run show install uninstall help

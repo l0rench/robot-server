@@ -10,3 +10,4 @@ industrial_gateway
 *.csv
 *.bak
 *.backup*
+.env

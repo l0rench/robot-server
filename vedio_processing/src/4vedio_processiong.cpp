@@ -1,11 +1,12 @@
+
 // 4vedio_processiong.cpp
-// 编译命令:
-// g++ -std=c++17 -O2 -o stream_gst 4vedio_processiong.cpp \
-//     $(pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 opencv4) \
-//     -I/usr/local/include \
-//     -I/home/cat/Orbbec/include/libobsensor/h \
-//     $(pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 opencv4) \
-//     -lOrbbecSDK -lpthread -ldl -lrt -lm
+/* 编译命令:
+g++ -std=c++17 -O2 -o stream_gst 4vedio_processiong.cpp \
+    $(pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 opencv4) \
+    -I/usr/local/include \
+    -I/home/cat/Orbbec/include/libobsensor/h \
+    $(pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 opencv4) \
+    -lOrbbecSDK -lpthread -ldl -lrt -lm */
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -36,6 +37,84 @@
 #include <sstream>
 #include <fcntl.h>
 
+// ===== OBFormat 枚举转字符串名称（来自 ObTypes.h）=====
+static const char* formatName(int format) {
+    switch (format) {
+        case -1:  return "UNKNOWN";
+        case  0:  return "YUYV";
+        case  1:  return "YUY2";
+        case  2:  return "UYVY";
+        case  3:  return "NV12";
+        case  4:  return "NV21";
+        case  5:  return "MJPG";
+        case  6:  return "H264";
+        case  7:  return "H265";
+        case  8:  return "Y16";
+        case  9:  return "Y8";
+        case 10:  return "Y10";
+        case 11:  return "Y11";
+        case 12:  return "Y12";
+        case 13:  return "GRAY";
+        case 14:  return "HEVC";
+        case 15:  return "I420";
+        case 16:  return "ACCEL";
+        case 17:  return "GYRO";
+        case 19:  return "POINT";
+        case 20:  return "RGB_POINT";
+        case 21:  return "RLE";
+        case 22:  return "RGB";
+        case 23:  return "BGR";
+        case 24:  return "Y14";
+        case 25:  return "BGRA";
+        case 26:  return "COMPRESSED";
+        case 27:  return "RVL";
+        case 28:  return "Z16";
+        case 29:  return "YV12";
+        case 30:  return "BA81";
+        case 31:  return "RGBA";
+        case 32:  return "BYR2";
+        case 33:  return "RW16";
+        case 34:  return "Y12C4";
+        default:  return "UNKNOWN";
+    }
+}
+
+// ===== OBStreamType 枚举转字符串名称 =====
+static const char* streamTypeName(int type) {
+    switch (type) {
+        case -1: return "UNKNOWN";
+        case  0: return "VIDEO";
+        case  1: return "IR";
+        case  2: return "COLOR";
+        case  3: return "DEPTH";
+        case  4: return "ACCEL";
+        case  5: return "GYRO";
+        case  6: return "IR_LEFT";
+        case  7: return "IR_RIGHT";
+        case  8: return "RAW_PHASE";
+        case  9: return "CONFIDENCE";
+        default: return "UNKNOWN";
+    }
+}
+
+// ===== OBSensorType 枚举转字符串名称 =====
+static const char* sensorTypeName(int type) {
+    switch (type) {
+        case  0: return "UNKNOWN";
+        case  1: return "IR";
+        case  2: return "COLOR";
+        case  3: return "DEPTH";
+        case  4: return "ACCEL";
+        case  5: return "GYRO";
+        case  6: return "IR_LEFT";
+        case  7: return "IR_RIGHT";
+        case  8: return "RAW_PHASE";
+        case  9: return "CONFIDENCE";
+        default: return "UNKNOWN";
+    }
+}
+
+
 static volatile sig_atomic_t g_running = 1;
 
 // ===== 全局日志 =====
@@ -56,6 +135,7 @@ struct TimestampPacket {
 };
 
 void signalHandler(int sig) {
+    (void)sig;
     g_running = 0;
 }
 
@@ -134,6 +214,7 @@ static V4l2StreamData g_v4l2_data[2] = {
 
 // Pad Probe 回调函数
 static GstPadProbeReturn v4l2_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+    (void)pad;
     V4l2StreamData* data = static_cast<V4l2StreamData*>(user_data);
     if (!data) return GST_PAD_PROBE_OK;
     
@@ -412,6 +493,24 @@ int main(int argc, char *argv[]) {
         auto pipeline_ob = std::make_shared<ob::Pipeline>(device);
         
         auto depthProfiles = pipeline_ob->getStreamProfileList(OB_SENSOR_DEPTH);
+
+        // ===== 打印深度相机所有可用配置（格式名称） =====
+        std::cout << "\n=== Depth Camera Available Profiles ===" << std::endl;
+        for (uint32_t i = 0; i < depthProfiles->count(); ++i) {
+            auto profile = depthProfiles->getProfile(i);
+            auto videoProfile = profile->as<ob::VideoStreamProfile>();
+            if (videoProfile) {
+                std::cout << "  [" << i << "] "
+                          << videoProfile->width() << "x" << videoProfile->height()
+                          << " @ " << videoProfile->fps() << "fps"
+                          << " Format: " << formatName(videoProfile->format())
+                          << std::endl;
+            } else {
+                std::cout << "  [" << i << "] (not a video profile)" << std::endl;
+            }
+        }
+        std::cout << "==========================================\n" << std::endl;
+
         auto depthProfile = depthProfiles->getVideoStreamProfile(DEPTH_WIDTH, DEPTH_HEIGHT, OB_FORMAT_Y16, 30);
         if (!depthProfile) {
             depthProfile = depthProfiles->getVideoStreamProfile(DEPTH_WIDTH, DEPTH_HEIGHT, OB_FORMAT_ANY, 30);
@@ -425,9 +524,27 @@ int main(int argc, char *argv[]) {
              }
         }
         std::cout << "Selected Depth: " << depthProfile->width() << "x" << depthProfile->height() 
-                  << " Format: " << depthProfile->format() << std::endl;
+                  << " Format: " << formatName(depthProfile->format()) << std::endl;
 
         auto colorProfiles = pipeline_ob->getStreamProfileList(OB_SENSOR_COLOR);
+
+        // ===== 打印彩色相机所有可用配置（格式名称） =====
+        std::cout << "\n=== Color Camera Available Profiles ===" << std::endl;
+        for (uint32_t i = 0; i < colorProfiles->count(); ++i) {
+            auto profile = colorProfiles->getProfile(i);
+            auto videoProfile = profile->as<ob::VideoStreamProfile>();
+            if (videoProfile) {
+                std::cout << "  [" << i << "] "
+                          << videoProfile->width() << "x" << videoProfile->height()
+                          << " @ " << videoProfile->fps() << "fps"
+                          << " Format: " << formatName(videoProfile->format())
+                          << std::endl;
+            } else {
+                std::cout << "  [" << i << "] (not a video profile)" << std::endl;
+            }
+        }
+        std::cout << "==========================================\n" << std::endl;
+
         std::shared_ptr<ob::VideoStreamProfile> colorProfile = nullptr;
         
         std::vector<std::pair<int, int>> preferred_resolutions = {
@@ -437,7 +554,7 @@ int main(int argc, char *argv[]) {
         for (const auto& res : preferred_resolutions) {
             for (size_t i = 0; i < colorProfiles->count(); ++i) {
                 auto p = colorProfiles->getProfile(i)->as<ob::VideoStreamProfile>();
-                if (p->width() == res.first && p->height() == res.second && p->fps() == 30) {
+                if (p->width() == static_cast<uint32_t>(res.first) && p->height() == static_cast<uint32_t>(res.second) && p->fps() == 30) {
                     if (p->format() == OB_FORMAT_YUYV || p->format() == OB_FORMAT_NV12 || p->format() == OB_FORMAT_UYVY) {
                         colorProfile = p;
                         color_width = res.first;
@@ -467,21 +584,32 @@ int main(int argc, char *argv[]) {
         }
 
         std::cout << "Selected Color: " << colorProfile->width() << "x" << colorProfile->height() 
-                  << " Format: " << colorProfile->format() << " @ " << colorProfile->fps() << " FPS" << std::endl;
+                  << " Format: " << formatName(colorProfile->format()) << " @ " << colorProfile->fps() << " FPS" << std::endl;
 
         // ===== 构建 GStreamer Pipeline =====
-        std::string depth_caps = "video/x-raw,format=NV12,width=" + std::to_string(depthProfile->width()) + 
+        std::string depth_caps = "video/x-raw,format=Y16,width=" + std::to_string(depthProfile->width()) + 
                                  ",height=" + std::to_string(depthProfile->height()) + ",framerate=30/1";
-        std::string color_caps = "video/x-raw,format=NV12,width=" + std::to_string(color_width) + 
+        // 获取彩色流实际格式名称用于caps
+        std::string color_format_str;
+        switch (colorProfile->format()) {
+            case OB_FORMAT_YUYV:
+            case OB_FORMAT_YUY2: color_format_str = "YUYV"; break;
+            case OB_FORMAT_NV12: color_format_str = "NV12"; break;
+            case OB_FORMAT_UYVY: color_format_str = "UYVY"; break;
+            default: color_format_str = "NV12"; break;
+        }
+        std::cout << "Color actual format: " << formatName(colorProfile->format()) << std::endl;
+
+        std::string color_caps = "video/x-raw,format=" + color_format_str + ",width=" + std::to_string(color_width) + 
                                  ",height=" + std::to_string(color_height) + ",framerate=30/1";
 
         std::string pipeline_str =
             "appsrc name=depth_src is-live=true format=time ! " +
-            depth_caps + " ! queue ! mpph264enc ! " +
+            depth_caps + " ! queue ! videoconvert ! video/x-raw,format=NV12 ! mpph264enc b-frames=0 ! " +
             "rtph264pay config-interval=1 pt=96 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9000 sync=false async=false " +
             
             "appsrc name=color_src is-live=true format=time ! " +
-            color_caps + " ! queue ! mpph264enc ! " +
+            color_caps + " ! queue ! videoconvert ! video/x-raw,format=NV12 ! mpph264enc b-frames=0 ! " +
             "rtph264pay config-interval=1 pt=96 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9001 sync=false async=false ";
 
         // v4l2 流 1
@@ -489,7 +617,7 @@ int main(int argc, char *argv[]) {
             pipeline_str +=
                 "v4l2src name=v4l2_src1 device=/dev/video22 do-timestamp=true ! "
                 "video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 ! "
-                "queue ! mpph264enc ! "
+                "queue ! mpph264enc b-frames=0 ! "
                 "rtph264pay config-interval=1 pt=97 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9002 sync=false async=false ";
         }
 
@@ -498,7 +626,7 @@ int main(int argc, char *argv[]) {
             pipeline_str +=
                 "v4l2src name=v4l2_src2 device=/dev/video31 do-timestamp=true ! "
                 "video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 ! "
-                "queue ! mpph264enc ! "
+                "queue ! mpph264enc b-frames=0 ! "
                 "rtph264pay config-interval=1 pt=98 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9003 sync=false async=false ";
         }
 
@@ -540,10 +668,7 @@ int main(int argc, char *argv[]) {
         std::cout << "  Press Ctrl+C to stop" << std::endl;
         std::cout << "=========================\n" << std::endl;
 
-        size_t depth_nv12_size = depthProfile->width() * depthProfile->height() * 3 / 2;
-        size_t color_nv12_size = color_width * color_height * 3 / 2;
-        std::vector<uint8_t> depth_nv12_buf(depth_nv12_size);
-        std::vector<uint8_t> color_nv12_buf(color_nv12_size);
+
 
         int depth_frame_count = 0;
         int color_frame_count = 0;
@@ -559,16 +684,15 @@ int main(int argc, char *argv[]) {
             auto depthFrame = frameSet->depthFrame();
             if (depthFrame) {
                 depth_frame_count++;
-                if (convertFrameToNV12(depthFrame, depth_nv12_buf, depthProfile->width(), depthProfile->height())) {
-                    uint64_t send_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                std::chrono::system_clock::now().time_since_epoch()).count();
-                    if (pushFrame(depth_appsrc, depth_nv12_buf.data(), depth_nv12_size, capture_time_ns)) {
-                        send_timestamp_udp(capture_time_ns, send_time_ns, "depth");
-                        static int depth_print = 0;
-                        if (++depth_print % 30 == 0) {
-                            std::cout << "[Sender] depth: PTS=" << timestampToHuman(capture_time_ns) 
-                                      << ", send=" << timestampToHuman(send_time_ns) << std::endl;
-                        }
+                // 直接推送Y16原始帧，不做CPU格式转换，由videoconvert硬件转NV12
+                uint64_t send_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch()).count();
+                if (pushFrame(depth_appsrc, depthFrame->data(), depthFrame->dataSize(), capture_time_ns)) {
+                    send_timestamp_udp(capture_time_ns, send_time_ns, "depth");
+                    static int depth_print = 0;
+                    if (++depth_print % 30 == 0) {
+                        std::cout << "[Sender] depth: PTS=" << timestampToHuman(capture_time_ns) 
+                                  << ", send=" << timestampToHuman(send_time_ns) << std::endl;
                     }
                 }
             }
@@ -576,16 +700,15 @@ int main(int argc, char *argv[]) {
             auto colorFrame = frameSet->colorFrame();
             if (colorFrame) {
                 color_frame_count++;
-                if (convertFrameToNV12(colorFrame, color_nv12_buf, color_width, color_height)) {
-                    uint64_t send_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                std::chrono::system_clock::now().time_since_epoch()).count();
-                    if (pushFrame(color_appsrc, color_nv12_buf.data(), color_nv12_size, capture_time_ns)) {
-                        send_timestamp_udp(capture_time_ns, send_time_ns, "color");
-                        static int color_print = 0;
-                        if (++color_print % 30 == 0) {
-                            std::cout << "[Sender] color: PTS=" << timestampToHuman(capture_time_ns) 
-                                      << ", send=" << timestampToHuman(send_time_ns) << std::endl;
-                        }
+                // 直接推送原始帧(YUYV/NV12)，不做CPU格式转换，由videoconvert硬件转NV12
+                uint64_t send_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch()).count();
+                if (pushFrame(color_appsrc, colorFrame->data(), colorFrame->dataSize(), capture_time_ns)) {
+                    send_timestamp_udp(capture_time_ns, send_time_ns, "color");
+                    static int color_print = 0;
+                    if (++color_print % 30 == 0) {
+                        std::cout << "[Sender] color: PTS=" << timestampToHuman(capture_time_ns) 
+                                  << ", send=" << timestampToHuman(send_time_ns) << std::endl;
                     }
                 }
             }
