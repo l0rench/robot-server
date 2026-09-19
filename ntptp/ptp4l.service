@@ -1,0 +1,12 @@
+[Unit]
+Description=PTP Master Clock Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ptp4l -i eth0 -H -m -l 6 -f /etc/linuxptp/ptp4l-master.cfg
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
