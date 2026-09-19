@@ -1,7 +1,7 @@
 build/
 *.o
-*.a
-*.so
+# *.a
+# *.so
 *.out
 industrial_gateway
 .vscode/

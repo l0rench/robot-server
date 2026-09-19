@@ -12,7 +12,7 @@ g++ -std=c++17 -O2 -o stream_gst 4vedio_processiong.cpp \
 #define _GNU_SOURCE
 #endif
 
-#include <libobsensor/ObSensor.hpp>
+#include <ObSensor.hpp>
 #include <ObTypes.h>
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
