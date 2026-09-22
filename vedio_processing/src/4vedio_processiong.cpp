@@ -12,7 +12,7 @@ g++ -std=c++17 -O2 -o stream_gst 4vedio_processiong.cpp \
 #define _GNU_SOURCE
 #endif
 
-#include <ObSensor.hpp>
+#include <libobsensor/ObSensor.hpp>
 #include <ObTypes.h>
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
@@ -587,29 +587,18 @@ int main(int argc, char *argv[]) {
                   << " Format: " << formatName(colorProfile->format()) << " @ " << colorProfile->fps() << " FPS" << std::endl;
 
         // ===== 构建 GStreamer Pipeline =====
-        std::string depth_caps = "video/x-raw,format=Y16,width=" + std::to_string(depthProfile->width()) + 
+        std::string depth_caps = "video/x-raw,format=NV12,width=" + std::to_string(depthProfile->width()) + 
                                  ",height=" + std::to_string(depthProfile->height()) + ",framerate=30/1";
-        // 获取彩色流实际格式名称用于caps
-        std::string color_format_str;
-        switch (colorProfile->format()) {
-            case OB_FORMAT_YUYV:
-            case OB_FORMAT_YUY2: color_format_str = "YUYV"; break;
-            case OB_FORMAT_NV12: color_format_str = "NV12"; break;
-            case OB_FORMAT_UYVY: color_format_str = "UYVY"; break;
-            default: color_format_str = "NV12"; break;
-        }
-        std::cout << "Color actual format: " << formatName(colorProfile->format()) << std::endl;
-
-        std::string color_caps = "video/x-raw,format=" + color_format_str + ",width=" + std::to_string(color_width) + 
+        std::string color_caps = "video/x-raw,format=NV12,width=" + std::to_string(color_width) + 
                                  ",height=" + std::to_string(color_height) + ",framerate=30/1";
 
         std::string pipeline_str =
             "appsrc name=depth_src is-live=true format=time ! " +
-            depth_caps + " ! queue ! videoconvert ! video/x-raw,format=NV12 ! mpph264enc b-frames=0 ! " +
+            depth_caps + " ! queue ! mpph264enc b-frames=0 ! " +
             "rtph264pay config-interval=1 pt=96 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9000 sync=false async=false " +
             
             "appsrc name=color_src is-live=true format=time ! " +
-            color_caps + " ! queue ! videoconvert ! video/x-raw,format=NV12 ! mpph264enc b-frames=0 ! " +
+            color_caps + " ! queue ! mpph264enc b-frames=0 ! " +
             "rtph264pay config-interval=1 pt=96 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9001 sync=false async=false ";
 
         // v4l2 流 1
@@ -668,7 +657,10 @@ int main(int argc, char *argv[]) {
         std::cout << "  Press Ctrl+C to stop" << std::endl;
         std::cout << "=========================\n" << std::endl;
 
-
+        size_t depth_nv12_size = depthProfile->width() * depthProfile->height() * 3 / 2;
+        size_t color_nv12_size = color_width * color_height * 3 / 2;
+        std::vector<uint8_t> depth_nv12_buf(depth_nv12_size);
+        std::vector<uint8_t> color_nv12_buf(color_nv12_size);
 
         int depth_frame_count = 0;
         int color_frame_count = 0;
@@ -684,15 +676,16 @@ int main(int argc, char *argv[]) {
             auto depthFrame = frameSet->depthFrame();
             if (depthFrame) {
                 depth_frame_count++;
-                // 直接推送Y16原始帧，不做CPU格式转换，由videoconvert硬件转NV12
-                uint64_t send_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                            std::chrono::system_clock::now().time_since_epoch()).count();
-                if (pushFrame(depth_appsrc, depthFrame->data(), depthFrame->dataSize(), capture_time_ns)) {
-                    send_timestamp_udp(capture_time_ns, send_time_ns, "depth");
-                    static int depth_print = 0;
-                    if (++depth_print % 30 == 0) {
-                        std::cout << "[Sender] depth: PTS=" << timestampToHuman(capture_time_ns) 
-                                  << ", send=" << timestampToHuman(send_time_ns) << std::endl;
+                if (convertFrameToNV12(depthFrame, depth_nv12_buf, depthProfile->width(), depthProfile->height())) {
+                    uint64_t send_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                std::chrono::system_clock::now().time_since_epoch()).count();
+                    if (pushFrame(depth_appsrc, depth_nv12_buf.data(), depth_nv12_size, capture_time_ns)) {
+                        send_timestamp_udp(capture_time_ns, send_time_ns, "depth");
+                        static int depth_print = 0;
+                        if (++depth_print % 30 == 0) {
+                            std::cout << "[Sender] depth: PTS=" << timestampToHuman(capture_time_ns) 
+                                      << ", send=" << timestampToHuman(send_time_ns) << std::endl;
+                        }
                     }
                 }
             }
@@ -700,15 +693,16 @@ int main(int argc, char *argv[]) {
             auto colorFrame = frameSet->colorFrame();
             if (colorFrame) {
                 color_frame_count++;
-                // 直接推送原始帧(YUYV/NV12)，不做CPU格式转换，由videoconvert硬件转NV12
-                uint64_t send_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                            std::chrono::system_clock::now().time_since_epoch()).count();
-                if (pushFrame(color_appsrc, colorFrame->data(), colorFrame->dataSize(), capture_time_ns)) {
-                    send_timestamp_udp(capture_time_ns, send_time_ns, "color");
-                    static int color_print = 0;
-                    if (++color_print % 30 == 0) {
-                        std::cout << "[Sender] color: PTS=" << timestampToHuman(capture_time_ns) 
-                                  << ", send=" << timestampToHuman(send_time_ns) << std::endl;
+                if (convertFrameToNV12(colorFrame, color_nv12_buf, color_width, color_height)) {
+                    uint64_t send_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                std::chrono::system_clock::now().time_since_epoch()).count();
+                    if (pushFrame(color_appsrc, color_nv12_buf.data(), color_nv12_size, capture_time_ns)) {
+                        send_timestamp_udp(capture_time_ns, send_time_ns, "color");
+                        static int color_print = 0;
+                        if (++color_print % 30 == 0) {
+                            std::cout << "[Sender] color: PTS=" << timestampToHuman(capture_time_ns) 
+                                      << ", send=" << timestampToHuman(send_time_ns) << std::endl;
+                        }
                     }
                 }
             }
