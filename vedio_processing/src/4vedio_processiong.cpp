@@ -592,32 +592,39 @@ int main(int argc, char *argv[]) {
         std::string color_caps = "video/x-raw,format=NV12,width=" + std::to_string(color_width) + 
                                  ",height=" + std::to_string(color_height) + ",framerate=30/1";
 
-        std::string pipeline_str =
-            "appsrc name=depth_src is-live=true format=time ! " +
-            depth_caps + " ! queue ! mpph264enc b-frames=0 ! " +
-            "rtph264pay config-interval=1 pt=96 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9000 sync=false async=false " +
-            
-            "appsrc name=color_src is-live=true format=time ! " +
-            color_caps + " ! queue ! mpph264enc b-frames=0 ! " +
-            "rtph264pay config-interval=1 pt=96 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9001 sync=false async=false ";
+std::string pipeline_str =
+    "appsrc name=depth_src is-live=true format=time max-bytes=0 drop=true ! " +
+    depth_caps + " ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! " +
+    "mpph264enc max-bframes=0 low-latency=1 ! " +
+    "rtph264pay config-interval=1 pt=96 ! udpsink host=" + std::string(RECEIVER_IP) + 
+    " port=9000 sync=false async=false latency=0 " +
+    
+    "appsrc name=color_src is-live=true format=time max-bytes=0 drop=true ! " +
+    color_caps + " ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! " +
+    "mpph264enc max-bframes=0 low-latency=1 ! " +
+    "rtph264pay config-interval=1 pt=96 ! udpsink host=" + std::string(RECEIVER_IP) + 
+    " port=9001 sync=false async=false latency=0";
 
-        // v4l2 流 1
-        if (access("/dev/video22", F_OK) == 0) {
-            pipeline_str +=
-                "v4l2src name=v4l2_src1 device=/dev/video22 do-timestamp=true ! "
-                "video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 ! "
-                "queue ! mpph264enc b-frames=0 ! "
-                "rtph264pay config-interval=1 pt=97 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9002 sync=false async=false ";
-        }
+// v4l2 流 1
+if (access("/dev/video22", F_OK) == 0) {
+    pipeline_str +=
+        "v4l2src name=v4l2_src1 device=/dev/video22 do-timestamp=true ! "
+        "video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 ! "
+        "queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! "
+        "mpph264enc max-bframes=0 low-latency=1 ! "
+        "rtph264pay config-interval=1 pt=97 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9002 sync=false async=false latency=0 ";
+}
 
-        // v4l2 流 2
-        if (access("/dev/video31", F_OK) == 0) {
-            pipeline_str +=
-                "v4l2src name=v4l2_src2 device=/dev/video31 do-timestamp=true ! "
-                "video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 ! "
-                "queue ! mpph264enc b-frames=0 ! "
-                "rtph264pay config-interval=1 pt=98 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9003 sync=false async=false ";
-        }
+// v4l2 流 2
+if (access("/dev/video31", F_OK) == 0) {
+    pipeline_str +=
+        "v4l2src name=v4l2_src2 device=/dev/video31 do-timestamp=true ! "
+        "video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 ! "
+        "queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! "
+        "mpph264enc max-bframes=0 low-latency=1 ! "
+        "rtph264pay config-interval=1 pt=98 ! udpsink host=" + std::string(RECEIVER_IP) + " port=9003 sync=false async=false latency=0 ";
+}
+        
 
         std::cout << "Pipeline:\n" << pipeline_str << "\n";
 

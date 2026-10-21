@@ -163,17 +163,29 @@ mkdir -p build && cd build && cmake .. && make
 - GStreamer 管道构建与视频流采集
 - 多格式图像转换（YUYV/UYVY/NV12/NV21/I420/YV12/Y16/RGB/BGR 等转 NV12）
 - GStreamer Pad Probe 捕获 v4l2 流时间戳
-- UDP 时间戳同步信号发送（端口 6001，目标 IP `192.168.7.2`）
+- 四路视频流 RTP/H.264 UDP 发送（深度/彩色/两路 v4l2）
+- UDP 时间戳同步信号发送（端口 6001）
 - 时间戳日志记录（CSV 格式输出至 `build/timestamp_sender.csv`）
 - 信号处理（SIGINT/SIGTERM 优雅退出）
 
-**UDP 时间戳数据包结构：**
+**GStreamer Pipeline 输出端口（视频流）：**
+
+| 流名称 | 设备/来源 | 端口 | 编码格式 | 分辨率 | 帧率 | 说明 |
+|--------|-----------|------|----------|--------|------|------|
+| Depth | Orbbec 深度相机 | UDP :9000 | H.264 (rtph264pay) | 1280x720 | 30fps | 深度相机视频流 |
+| Color | Orbbec 彩色相机 | UDP :9001 | H.264 (rtph264pay) | 1280x720 (自适应) | 30fps | 彩色相机视频流 |
+| Cam1 | v4l2src /dev/video22 | UDP :9002 | H.264 (rtph264pay) | 1280x720 | 30fps | 外部摄像头1 |
+| Cam2 | v4l2src /dev/video31 | UDP :9003 | H.264 (rtph264pay) | 1280x720 | 30fps | 外部摄像头2 |
+
+> 注意：Cam1 和 Cam2 的 v4l2 设备节点通过 `access()` 检测，如果设备不存在则不会创建对应管道。
+
+**UDP 时间戳数据包结构（发给上位机的时间同步信号，不包含视频图像数据）：**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | pts_ns | uint64_t | 帧捕获时间戳（纳秒，Unix） |
 | send_time_ns | uint64_t | 发送时间戳（纳秒，Unix） |
-| id | char[8] | 流标识符（cam1/cam2） |
+| id | char[8] | 流标识符（depth/color/cam1/cam2） |
 
 **构建：**
 
@@ -254,12 +266,12 @@ make
 | imu_collector_thread | 采集 IMU 数据（加速度、角速度） |
 | motor_status_thread | 读取电机状态（转速、电流、位置、电压、告警码） |
 | display_thread | 终端 UI 显示实时系统状态 |
-| tcp_report_thread | TCP 客户端连接上位机，上报传感器和电机数据 |
+| tcp_report_thread | TCP 服务端监听上位机连接，上报传感器和电机数据，接收控制命令 |
 | motor_control_thread | 接收控制命令，驱动电机（位置/速度/力矩模式） |
 
 **关键配置：**
 
-- 默认 TCP 服务器地址：`127.0.0.1:8080`
+- 默认 TCP 监听地址：`0.0.0.0:8888`（监听所有网卡）
 - 电机 1 最大电流：1400mA，最大速度：200 RPM
 - 电机 2 最大电流：1400mA，最大速度：200 RPM
 - 默认加速度：1000 RPM/s²，减速度：1000 RPM/s²
@@ -292,6 +304,483 @@ NTP/PTP 网络时间同步配置，用于整个机器人系统的多节点时间
 
 ---
 
+## 通信协议详解
+
+本节详细描述所有网络通信接口的协议格式，供 Client 端开发参考。
+
+> **重要说明**：所有二进制协议字段默认采用**小端序（Little Endian）**排列。UDP 数据包以原始二进制形式发送，TCP 以文本（UTF-8）形式传输，以换行符 `\n` 分隔。
+
+### 协议总览
+
+| 端口 | 协议 | 方向 | 用途 | 所属模块 |
+|------|------|------|------|----------|
+| 6001 | UDP | 板卡→上位机 | 视频时间戳同步信号 | vedio_processing |
+| 9000 | UDP (RTP/H.264) | 板卡→上位机 | 深度相机视频流 | vedio_processing |
+| 9001 | UDP (RTP/H.264) | 板卡→上位机 | 彩色相机视频流 | vedio_processing |
+| 9002 | UDP (RTP/H.264) | 板卡→上位机 | 外部摄像头1视频流 | vedio_processing |
+| 9003 | UDP (RTP/H.264) | 板卡→上位机 | 外部摄像头2视频流 | vedio_processing |
+| 9005 | UDP (二进制) | 板卡→上位机 | IMU/AHRS 姿态数据 | imu |
+| 9999 | UDP (二进制) | 板卡→上位机 | Livox 激光雷达点云数据 | radar |
+| 8888 | TCP (文本) | 板卡↔上位机 | 环境/电机数据上报 + 电机控制命令 | server |
+
+---
+
+### 一、视频时间戳同步（UDP :6001）
+
+视频处理模块每采集一帧视频，都会通过 UDP 发送一个时间戳包，记录帧捕获时间和发送时间，用于上位机做时间对齐和延时计算。
+
+**数据包结构（固定 24 字节，C 结构体）：**
+
+```c
+struct TimestampPacket {
+    uint64_t pts_ns;        // 偏移0:  8字节 - 帧捕获时间戳（纳秒，Unix epoch）
+    uint64_t send_time_ns;  // 偏移8:  8字节 - UDP发送时间戳（纳秒，Unix epoch）
+    char id[8];             // 偏移16: 8字节 - 流标识符，字符串，'\0'结尾
+};                           // 总计：24字节
+```
+
+**字段说明：**
+
+| 字段 | 偏移 | 类型 | 大小 | 说明 |
+|------|------|------|------|------|
+| pts_ns | 0 | uint64_t | 8 bytes | 帧被相机捕获时的 Unix 时间戳（纳秒）。由 GStreamer PTS 通过 v4l2 probe 获取并转换为 Unix 时间 |
+| send_time_ns | 8 | uint64_t | 8 bytes | 数据包通过 sendto 发出时的 Unix 时间戳（纳秒）。可用于计算端到端延时 |
+| id | 16 | char[8] | 8 bytes | 流标识符。可能的值：depth、color、cam1、cam2 |
+
+**Python 接收示例：**
+
+```python
+import socket
+import struct
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('0.0.0.0', 6001))
+
+while True:
+    data, addr = sock.recvfrom(24)
+    pts_ns, send_time_ns, id_bytes = struct.unpack('<QQ8s', data)
+    stream_id = id_bytes.decode('ascii').rstrip('\0')
+    latency_ns = send_time_ns - pts_ns
+    print(f"[{stream_id}] pts={pts_ns}ns  send={send_time_ns}ns  latency={latency_ns}ns")
+```
+
+---
+
+### 二、视频流接收（UDP :9000 ~ :9003）
+
+视频处理模块通过 GStreamer 的 udpsink 组件，将四路视频流编码为 H.264 后以 RTP 包形式从四个 UDP 端口发出。
+
+**四路视频流端口：**
+
+| 流 | 端口 | 编码 | 分辨率 | 帧率 |
+|----|------|------|--------|------|
+| 深度相机 | :9000 | H.264 (RTP) | 1280x720 | 30fps |
+| 彩色相机 | :9001 | H.264 (RTP) | 自适应（优先1280x720） | 30fps |
+| 摄像头1 | :9002 | H.264 (RTP) | 1280x720 | 30fps |
+| 摄像头2 | :9003 | H.264 (RTP) | 1280x720 | 30fps |
+
+这些端口发送的是标准 RTP over UDP 包（payload type = 96/97/98）。
+
+**接收方式1：GStreamer（推荐）**
+
+```bash
+# 接收深度相机流并播放
+gst-launch-1.0 udpsrc port=9000 ! application/x-rtp,payload=96 ! rtph264depay ! avdec_h264 ! autovideosink
+
+# 接收彩色相机流
+gst-launch-1.0 udpsrc port=9001 ! application/x-rtp,payload=96 ! rtph264depay ! avdec_h264 ! autovideosink
+
+# 接收摄像头1流
+gst-launch-1.0 udpsrc port=9002 ! application/x-rtp,payload=97 ! rtph264depay ! avdec_h264 ! autovideosink
+
+# 接收摄像头2流
+gst-launch-1.0 udpsrc port=9003 ! application/x-rtp,payload=98 ! rtph264depay ! avdec_h264 ! autovideosink
+```
+
+**接收方式2：VLC 直接播放**
+
+```
+vlc rtp://@:9000
+vlc rtp://@:9001
+vlc rtp://@:9002
+vlc rtp://@:9003
+```
+
+**接收方式3：Python (GStreamer Python bindings)**
+
+```python
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst
+
+Gst.init(None)
+
+# 为每个流创建 udpsrc pipeline
+def create_pipeline(port, payload=96):
+    pipeline = Gst.parse_launch(
+        f'udpsrc port={port} ! '
+        f'application/x-rtp,payload={payload} ! '
+        f'rtph264depay ! '
+        f'avdec_h264 ! '
+        f'videoconvert ! '
+        f'appsink name=sink'
+    )
+    return pipeline
+
+# 深度相机
+pipe_depth = create_pipeline(9000)
+pipe_depth.get_by_name('sink').set_property('emit-signals', True)
+pipe_depth.set_state(Gst.State.PLAYING)
+```
+
+---
+
+### 三、IMU/AHRS 姿态数据（UDP :9005）
+
+IMU 模块通过串口读取 AHRS 传感器数据，每帧打包为固定 64 字节的二进制包通过 UDP 发送。
+
+**数据包结构（固定 64 字节）：**
+
+| 字段 | 偏移 | 类型 | 大小 | 说明 |
+|------|------|------|------|------|
+| frame_seq | 0 | uint64_t | 8 bytes | 帧序列号，从0开始递增，可用于检测丢包 |
+| send_time_us | 8 | uint64_t | 8 bytes | 发送时间戳（微秒，Unix epoch）。通过 clock_gettime(CLOCK_REALTIME) 获取 |
+| roll | 16 | float (IEEE 754) | 4 bytes | 横滚角（弧度） |
+| pitch | 20 | float (IEEE 754) | 4 bytes | 俯仰角（弧度） |
+| yaw | 24 | float (IEEE 754) | 4 bytes | 偏航角（弧度） |
+| gx | 28 | float (IEEE 754) | 4 bytes | 角速度 X 轴（rad/s） |
+| gy | 32 | float (IEEE 754) | 4 bytes | 角速度 Y 轴（rad/s） |
+| gz | 36 | float (IEEE 754) | 4 bytes | 角速度 Z 轴（rad/s） |
+| ax | 40 | float (IEEE 754) | 4 bytes | 加速度 X 轴（m/s²） |
+| ay | 44 | float (IEEE 754) | 4 bytes | 加速度 Y 轴（m/s²） |
+| az | 48 | float (IEEE 754) | 4 bytes | 加速度 Z 轴（m/s²） |
+| (padding) | 52 | — | 12 bytes | 填充至64字节（接收端可忽略） |
+
+> 注意：所有浮点数均为小端序（Little-Endian），与 x86/aarch64 一致。
+
+**Python 接收与解析示例：**
+
+```python
+import socket
+import struct
+import math
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('0.0.0.0', 9005))
+
+print("等待IMU数据...")
+while True:
+    data, addr = sock.recvfrom(64)
+
+    # 解析固定64字节包（实际数据在前52字节）
+    frame_seq, send_time_us, roll, pitch, yaw, gx, gy, gz, ax, ay, az = struct.unpack('<QQfffffffff', data[:52])
+
+    # 转换为可读单位
+    roll_deg = math.degrees(roll)
+    pitch_deg = math.degrees(pitch)
+    yaw_deg = math.degrees(yaw)
+
+    send_time_s = send_time_us / 1e6
+    print(f"seq={frame_seq}  time={send_time_s:.6f}s  "
+          f"roll={roll_deg:.2f}deg pitch={pitch_deg:.2f}deg yaw={yaw_deg:.2f}deg  "
+          f"gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}  "
+          f"ax={ax:.3f} ay={ay:.3f} az={az:.3f}")
+```
+
+**C 语言接收端结构体定义：**
+
+```c
+#pragma pack(push, 1)
+struct ImuPacket {
+    uint64_t frame_seq;
+    uint64_t send_time_us;
+    float roll, pitch, yaw;
+    float gx, gy, gz;
+    float ax, ay, az;
+};
+#pragma pack(pop)
+// sizeof(struct ImuPacket) == 52，实际UDP包为64字节（含尾部padding）
+```
+
+---
+
+### 四、激光雷达点云数据（UDP :9999）
+
+雷达模块通过 Livox SDK 读取 Mid360 激光雷达的点云数据，每包加上时间戳元数据后通过 UDP 转发。
+
+**ForwardPacket 结构体（packed，变长）：**
+
+```c
+#pragma pack(push, 1)
+struct ForwardPacket {
+    uint64_t radar_timestamp_us;  // 偏移0:  8字节 - 雷达时间戳（微秒）。从Livox数据包中的8字节时间戳数组提取，除以1000转为微秒
+    uint64_t receive_time_us;     // 偏移8:  8字节 - 板卡接收时间戳（微秒，CLOCK_REALTIME）
+    uint64_t send_time_us;        // 偏移16: 8字节 - 板卡发送时间戳（微秒，与receive_time_us相同）
+    uint32_t frame_counter;       // 偏移24: 4字节 - 雷达帧计数器（data->frame_cnt）
+    uint32_t data_length;         // 偏移28: 4字节 - 后续raw_data的实际字节数
+    uint8_t  raw_data[1];         // 偏移32: 变长  - LivoxLidarEthernetPacket的原始数据
+};
+#pragma pack(pop)
+// 头部固定36字节 + 变长 raw_data
+```
+
+**字段说明：**
+
+| 字段 | 偏移 | 类型 | 大小 | 说明 |
+|------|------|------|------|------|
+| radar_timestamp_us | 0 | uint64_t | 8 bytes | 雷达时间戳（微秒）。Livox SDK回调中timestamp是uint8_t[8]数组（小端序），提取为纳秒后除以1000转为微秒 |
+| receive_time_us | 8 | uint64_t | 8 bytes | 板卡接收时间戳（微秒，CLOCK_REALTIME） |
+| send_time_us | 16 | uint64_t | 8 bytes | 板卡发送时间戳（微秒，与receive_time_us相同） |
+| frame_counter | 24 | uint32_t | 4 bytes | 雷达帧计数器 |
+| data_length | 28 | uint32_t | 4 bytes | 后续raw_data的实际字节数 |
+| raw_data | 32 | uint8_t[] | 变长 | Livox原始点云数据，具体格式取决于Livox SDK版本和雷达配置 |
+
+**raw_data 内容说明：**
+
+raw_data 是 Livox SDK 回调函数 PointCloudCallback 中 LivoxLidarEthernetPacket* data 指向的原始点云数据包。具体点结构定义请参考项目中的 `livox_lidar_def.h` 头文件，常见的点格式包括 LivoxLidarCartesianHighRawPoint 和 LivoxLidarCartesianLowRawPoint。
+
+**时间戳提取逻辑（源码）：**
+
+```c
+// Livox SDK 中 timestamp 是 uint8_t[8] 数组（小端序）
+uint64_t ExtractTimestampNs(const uint8_t* timestamp_array) {
+    uint64_t timestamp = 0;
+    for (int i = 0; i < 8; i++) {
+        timestamp |= ((uint64_t)timestamp_array[i]) << (i * 8);
+    }
+    return timestamp;  // 纳秒
+}
+// 转发时转为微秒：radar_timestamp_us = ExtractTimestampNs(data->timestamp) / 1000;
+```
+
+**Python 接收示例：**
+
+```python
+import socket
+import struct
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)  # 8MB接收缓冲
+sock.bind(('0.0.0.0', 9999))
+
+while True:
+    # 先接收头部（36字节）
+    header_data, addr = sock.recvfrom(36)
+    radar_ts_us, recv_ts_us, send_ts_us, frame_cnt, data_len = struct.unpack('<QQQII', header_data)
+
+    # 再接收变长数据
+    if data_len > 0:
+        raw_data, _ = sock.recvfrom(data_len)
+        print(f"frame={frame_cnt} len={data_len} "
+              f"radar_ts={radar_ts_us}us recv={recv_ts_us}us send={send_ts_us}us")
+        # raw_data 包含 Livox 原始点云数据
+        # 具体解析需参考 livox_lidar_def.h 中的点结构定义
+```
+
+---
+
+### 五、TCP 机器人数据与电机控制（TCP :8888）
+
+主控服务器以 TCP 服务端模式监听 `0.0.0.0:8888`，上位机（Client）连接后实现双向通信：板卡主动上报传感器/电机数据，上位机下发电机控制命令。
+
+**通信模式：**
+
+- 板卡作为 TCP Server，上位机作为 TCP Client 发起连接
+- 板卡以约 10Hz 的频率主动上报数据
+- 上位机可随时发送命令（基于文本协议，每条约以换行符结尾）
+- 板卡每帧上报后发送一个心跳包（单个换行符）维持连接
+
+#### 5.1 板卡 → 上位机（数据上报）
+
+**环境传感器数据：**
+
+```
+ENV:TEMP=25.3,HUM=60.1,PRESS=1013.2,GAS=1500,TS=1697012345.123456
+```
+
+| 字段 | 说明 | 单位 |
+|------|------|------|
+| TEMP | 温度 | 摄氏度 |
+| HUM | 湿度 | %RH |
+| PRESS | 气压 | hPa |
+| GAS | 气体电阻 | 欧姆 |
+| TS | 时间戳 | 秒（浮点，Unix epoch） |
+
+**电机状态数据：**
+
+```
+MOTOR:M1_SPD=120.5,M1_CUR=800,M1_POS=45.2,M1_V=24.5,M2_SPD=0.0,M2_CUR=0,M2_POS=0.0,M2_V=24.5,M1_ALARM=0x00000000,M2_ALARM=0x00000000,TS=1697012345.123456
+```
+
+| 字段 | 说明 | 单位 |
+|------|------|------|
+| M1_SPD | 电机1转速 | RPM |
+| M1_CUR | 电机1电流 | mA |
+| M1_POS | 电机1位置 | 度 |
+| M1_V | 电机1电压 | V |
+| M2_SPD | 电机2转速 | RPM |
+| M2_CUR | 电机2电流 | mA |
+| M2_POS | 电机2位置 | 度 |
+| M2_V | 电机2电压 | V |
+| M1_ALARM | 电机1告警码 | 十六进制 |
+| M2_ALARM | 电机2告警码 | 十六进制 |
+| TS | 时间戳 | 秒（浮点，Unix epoch） |
+
+#### 5.2 上位机 → 板卡（控制命令）
+
+**电机控制命令（MOTOR_CMD）：**
+
+```
+MOTOR_CMD:M1_ANGLE=45.0,M1_SPEED=100,M1_ENABLE=1,M1_STOP=0,M2_ANGLE=0,M2_SPEED=0,M2_ENABLE=0,M2_STOP=0,MODE=0
+```
+
+| 参数 | 类型 | 说明 | 可选值 |
+|------|------|------|--------|
+| M1_ANGLE | float | 电机1目标角度 | 度 |
+| M1_SPEED | float | 电机1目标速度 | RPM |
+| M1_ENABLE | int | 电机1使能 | 0=关, 1=开 |
+| M1_STOP | int | 电机1急停 | 0=正常, 1=停止（触发后强制关闭Enable） |
+| M2_ANGLE | float | 电机2目标角度 | 度 |
+| M2_SPEED | float | 电机2目标速度 | RPM |
+| M2_ENABLE | int | 电机2使能 | 0=关, 1=开 |
+| M2_STOP | int | 电机2急停 | 0=正常, 1=停止 |
+| MODE | int | 控制模式 | 0=位置模式, 1=速度模式, 2=力矩模式 |
+
+> 增量更新机制：未指定的参数将保持上一次的有效值不变。例如只发 `MOTOR_CMD:M1_ENABLE=1` 只会使能电机1，其他参数不改变。
+
+**日志消息（LOG_MSG）：**
+
+```
+LOG_MSG:system startup complete
+```
+
+板卡收到后写入内部日志队列，可用于远程调试。
+
+**系统命令（SYS_CMD）：**
+
+```
+SYS_CMD:SHUTDOWN    # 关机
+SYS_CMD:STATUS      # 查询系统状态
+SYS_CMD:RESET       # 复位（重置电机使能记忆）
+```
+
+**NTP 时间同步请求：**
+
+上位机发送 `NTP_REQ` 后，板卡回复当前时间：
+
+```
+上位机发送: NTP_REQ
+板卡回复:   NTP_RESP:TIMESTAMP=1697012345.123456
+```
+
+#### 5.3 Python TCP Client 完整示例
+
+```python
+import socket
+import time
+import threading
+
+class RobotClient:
+    def __init__(self, host='192.168.7.1', port=8888):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.connect((host, port))
+        self._running = True
+        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread.start()
+
+    def _recv_loop(self):
+        buffer = b''
+        while self._running:
+            try:
+                data = self.sock.recv(4096)
+                if not data:
+                    break
+                buffer += data
+                while b'\n' in buffer:
+                    line, buffer = buffer.split(b'\n', 1)
+                    line = line.decode('utf-8', errors='replace').strip()
+                    if line:
+                        print(f"[SERVER] {line}")
+                        if line.startswith('ENV:'):
+                            self._parse_env(line)
+                        elif line.startswith('MOTOR:'):
+                            self._parse_motor(line)
+                        elif line.startswith('NTP_RESP:'):
+                            self._parse_ntp(line)
+            except socket.error:
+                break
+
+    def _parse_env(self, line):
+        fields = {}
+        for item in line[5:].split(','):
+            if '=' in item:
+                k, v = item.split('=', 1)
+                fields[k] = v
+        print(f"  温度={fields.get('TEMP')}C  湿度={fields.get('HUM')}%  气压={fields.get('PRESS')}hPa")
+
+    def _parse_motor(self, line):
+        fields = {}
+        for item in line[7:].split(','):
+            if '=' in item:
+                k, v = item.split('=', 1)
+                fields[k] = v
+        print(f"  M1: speed={fields.get('M1_SPD')}rpm  pos={fields.get('M1_POS')}deg")
+        print(f"  M2: speed={fields.get('M2_SPD')}rpm  pos={fields.get('M2_POS')}deg")
+
+    def _parse_ntp(self, line):
+        ts = line.split('=')[1]
+        print(f"  板卡时间: {ts}")
+
+    def send_motor_cmd(self, m1_angle=0, m1_speed=0, m1_enable=0, m1_stop=0,
+                       m2_angle=0, m2_speed=0, m2_enable=0, m2_stop=0, mode=0):
+        cmd = (f"MOTOR_CMD:M1_ANGLE={m1_angle},M1_SPEED={m1_speed},"
+               f"M1_ENABLE={m1_enable},M1_STOP={m1_stop},"
+               f"M2_ANGLE={m2_angle},M2_SPEED={m2_speed},"
+               f"M2_ENABLE={m2_enable},M2_STOP={m2_stop},"
+               f"MODE={mode}\n")
+        self.sock.sendall(cmd.encode('utf-8'))
+
+    def send_log(self, msg):
+        cmd = f"LOG_MSG:{msg}\n"
+        self.sock.sendall(cmd.encode('utf-8'))
+
+    def send_sys_cmd(self, cmd):
+        self.sock.sendall(f"SYS_CMD:{cmd}\n".encode('utf-8'))
+
+    def request_ntp(self):
+        self.sock.sendall(b"NTP_REQ\n")
+
+    def close(self):
+        self._running = False
+        self.sock.close()
+
+# 使用示例
+if __name__ == '__main__':
+    client = RobotClient('192.168.7.1')
+    time.sleep(1)
+    client.send_motor_cmd(m1_angle=45.0, m1_enable=1)
+    time.sleep(2)
+    client.request_ntp()
+    client.close()
+```
+
+---
+
+### 通信协议总结表
+
+| 端口 | 协议 | 方向 | 数据格式 | 用途 |
+|------|------|------|----------|------|
+| 6001 | UDP | 板→上位机 | 二进制（24字节固定） | 视频时间戳同步 |
+| 9000 | UDP (RTP) | 板→上位机 | H.264 RTP包 | 深度相机视频流 |
+| 9001 | UDP (RTP) | 板→上位机 | H.264 RTP包 | 彩色相机视频流 |
+| 9002 | UDP (RTP) | 板→上位机 | H.264 RTP包 | 摄像头1视频流 |
+| 9003 | UDP (RTP) | 板→上位机 | H.264 RTP包 | 摄像头2视频流 |
+| 9005 | UDP | 板→上位机 | 二进制（64字节固定） | IMU/AHRS姿态数据 |
+| 9999 | UDP | 板→上位机 | 二进制（36字节头+变长） | 激光雷达点云数据 |
+| 8888 | TCP | 双向 | 文本协议（换行分隔） | 传感器上报 + 电机控制 |
+
+---
+
 ## 依赖库汇总
 
 | 库名 | 用途 | 适用模块 |
@@ -311,10 +800,14 @@ NTP/PTP 网络时间同步配置，用于整个机器人系统的多节点时间
 
 | 端口 | 协议 | 用途 | 所属模块 |
 |------|------|------|----------|
+| 6001 | UDP | 视频时间戳同步信号 | vedio_processing/ |
+| 9000 | UDP (RTP/H.264) | 深度相机视频流 | vedio_processing/ |
+| 9001 | UDP (RTP/H.264) | 彩色相机视频流 | vedio_processing/ |
+| 9002 | UDP (RTP/H.264) | 外部摄像头1视频流 | vedio_processing/ |
+| 9003 | UDP (RTP/H.264) | 外部摄像头2视频流 | vedio_processing/ |
 | 9005 | UDP | IMU 数据转发目标 | imu/ |
 | 9999 | UDP | 激光雷达点云转发目标 | radar/ |
-| 6001 | UDP | 视频时间戳同步信号 | vedio_processing/ |
-| 8080 | TCP | 机器人数据上报（主控→上位机） | server/ |
+| 8888 | TCP | 机器人数据上报与电机控制 | server/ |
 
 ---
 
